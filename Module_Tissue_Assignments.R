@@ -16,6 +16,110 @@ at_topology <- read_delim("/mnt/Chikorita/Brassica_rapa/coexpression/co_expressi
                           delim = "\t", escape_double = FALSE, 
                           trim_ws = TRUE) 
 
+#Prep
+br_topology %>%
+  select(Gene, Module) -> modules_Br #42,830 genes
+
+at_topology %>%
+  select(Gene, Module) -> modules_At #33,063 genes
+
+# Read the provided ortholog file
+orthologs <- read_tsv("/mnt/Chikorita/Brassica_rapa/coexpression/core_files/br_at_homologs.txt") %>%
+  dplyr::select(
+    br_gene = `Gene stable ID`, 
+    at_gene = `Arabidopsis thaliana gene stable ID`
+  ) %>%
+  # Remove rows where there is no Arabidopsis ortholog
+  filter(!is.na(at_gene) & at_gene != "") %>%
+  distinct() # Remove duplicates if any - 28,620 orthologous pairs
+
+# Clean up ortholog table names for easier merging
+colnames(orthologs)[1] <- "Br_GeneID"
+colnames(orthologs)[2] <- "At_GeneID"
+
+# Filter orthologs to keep only those present in our filtered WGCNA datasets
+valid_orthologs <- orthologs %>%
+  filter(Br_GeneID %in% modules_Br$Gene, 
+         At_GeneID %in% modules_At$Gene) %>%
+  select(Br_GeneID, At_GeneID) %>%
+  distinct() # Remove duplicates if any - 25,008 orthologous pairs are present in the co-expression networks
+
+# Merge Module Assignments into the Ortholog Table
+comparison_df <- valid_orthologs %>%
+  left_join(modules_Br, by = c("Br_GeneID" = "Gene")) %>%
+  rename(Br_Module = Module) %>%
+  left_join(modules_At, by = c("At_GeneID" = "Gene")) %>%
+  rename(At_Module = Module) #now lets assign module placement for Brassica and Arabidopsis
+
+## save what you have so far
+write_tsv(comparison_df, "ortho_pairs_in_networks.tsv")
+
+#### Assign modules to tissues used ortholog presence ####
+## Statistical Overlap (Hypergeometric Test)
+## looking to see if significant place of orthologs in similiar modules###
+
+# Get unique module labels
+at_mods <- sort(unique(comparison_df$At_Module)) #vector of the modules in Arabidopsis, 18
+br_mods <- sort(unique(comparison_df$Br_Module)) #vector of the modules in Brassica, 13
+
+# Initialize matrices for counts and p-values
+overlap_counts <- matrix(0, nrow = length(at_mods), ncol = length(br_mods))
+overlap_pvals <- matrix(1, nrow = length(at_mods), ncol = length(br_mods))
+rownames(overlap_counts) <- at_mods; colnames(overlap_counts) <- br_mods
+rownames(overlap_pvals) <- at_mods; colnames(overlap_pvals) <- br_mods
+
+# Total universe size (number of ortholog pairs used)
+n_total <- nrow(comparison_df) #25,008 orthologous pairs
+
+# Loop to calculate overlaps - determine where these orthologous pairs lie in the coexpression networks
+for (at_m in at_mods) {
+  for (br_m in br_mods) {
+    
+    # Set A: Ortholog pairs where the At gene is in module 'at_m'
+    set_A <- comparison_df %>% filter(At_Module == at_m) %>% nrow()
+    
+    # Set B: Ortholog pairs where the Br gene is in module 'br_m'
+    set_B <- comparison_df %>% filter(Br_Module == br_m) %>% nrow()
+    
+    # Intersection: Pairs in both
+    intersection <- comparison_df %>% filter(At_Module == at_m, Br_Module == br_m) %>% nrow()
+    
+    overlap_counts[at_m, br_m] <- intersection
+    
+    # Fisher's Exact Test (Hypergeometric)
+    # phyper(q, m, n, k, lower.tail = FALSE)
+    # q = intersection - 1
+    # m = size of Set A
+    # n = total - size of Set A
+    # k = size of Set B
+    if (set_A > 0 & set_B > 0) {
+      pval <- phyper(intersection - 1, set_A, n_total - set_A, set_B, lower.tail = FALSE)
+      overlap_pvals[at_m, br_m] <- pval
+    }
+  }
+}
+
+#### Visualization of module placement of orthologs ####
+library(gplots)
+# Create a heatmap of -log10(p-value) to show significant overlaps
+log_pvals <- -log10(overlap_pvals + 1e-300) # avoid log(0)
+
+# Generate PDF of the correspondence
+#pdf("At_Br_Module_Correspondence.pdf", width = 12, height = 12)
+heatmap.2(log_pvals,
+          main = "At vs Br Module Correspondence\n(-log10 P-val)",
+          trace = "none",
+          col = colorRampPalette(c("white", "#9e2a2b"))(50),
+          margins = c(12, 12),
+          dendrogram = "both",
+          xlab = "Brassica Modules",
+          ylab = "Arabidopsis Modules",
+          cellnote = overlap_counts, # Show the count of shared orthologs in cells
+          notecol = "black",
+          key.xlab = "-log10(P-value)",
+          keysize = 1.0) 
+#dev.off() 
+
 #### Assign Tissues to Modules using Eigengenes ####
 
 ##### Taking the top 80% of variable genes to assign to assign modules #####
@@ -159,3 +263,5 @@ at_br_mod_tiss_map_clean_wide <- rbind(map_at_clean, map_br_clean) %>%
     values_from = Module,
     values_fn   = ~ paste(unique(.x), collapse = ", ")
   )
+
+write.csv(at_br_mod_tiss_map_clean_wide, "/mnt/Chikorita/Brassica_rapa/manu_sup_files/at_br_mod_tiss_map_clean.csv")
